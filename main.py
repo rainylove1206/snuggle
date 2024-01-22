@@ -1,4 +1,5 @@
 from PIL import Image
+import cv2 as cv
 import numpy as np
 import os
 from tqdm import tqdm
@@ -8,65 +9,68 @@ import time
 import yaml
 import textwrap
 import re
-# pip install pillow numpy tqdm pyyaml
+# pip install pillow opencv-python numpy tqdm pyyaml
 
-def adjust_opacity(image, opacity):
-    """
-    调整图像的不透明度。
-    :param image: PIL Image对象，需要有alpha通道
-    :param opacity: 不透明度百分比，范围从0（完全透明）到1（完全不透明）
-    :return: 新的PIL Image对象
-    """
-    max_value = 255
-    # 将图像转换为numpy数组
-    arr = np.array(image, dtype=float) / 255
-    # 调整alpha通道
-    arr[..., 3] *= opacity
-    # 将结果转换回图像
-    result = Image.fromarray((arr * max_value).astype('uint8'), 'RGBA')
-    return result
-
-def normal(image1, image2, opacity=1.0):
+def normal(image1, image2, image3=None):
     """
     “正常”图层混合模式
-    :param image1: 下层图层PIL Image对象，需要有alpha通道，两个PIL Image对象需要在同一模式下
-    :param image2: 上层图层PIL Image对象，需要有alpha通道，两个PIL Image对象需要在同一模式下
-    :param opacity: 上层图层的不透明度百分比，范围从0（完全透明）到1（完全不透明）
-    :return: 新的PIL Image对象
+    :param image1: 原图numpy数组
+    :param image2: 水印numpy数组
+    :param image3: 擦脸numpy数组
+    :return: 新的numpy数组
     """
-    if opacity == 1.0:
-        return Image.alpha_composite(image1, image2)
-    else:
-        return Image.alpha_composite(image1, adjust_opacity(image2, opacity))
+    # 将擦脸部分在水印中的对应像素设为完全透明（image2会被修改）
+    if image3 is not None:
+        face = image3[..., 3] > 0.0
+        image2[face, 3] = 0.0
 
-def overlay(image1, image2, opacity=1.0):
+    # 将arr初始化为原图的副本（image1不会被修改）
+    arr = image1.copy()
+
+    # 找到水印中不完全透明的像素（完全透明的像素将不参与计算）
+    mask = image2[..., 3] > 0.0
+
+    # RGB通道：result_rgb = image2_rgb * alpha2 + image1_rgb * (1 - alpha2) * alpha1
+    arr[..., :3][mask] = (image2[..., :3][mask] * image2[..., 3, np.newaxis][mask] + image1[..., :3][mask]
+                          * (1 - image2[..., 3, np.newaxis][mask]) * image1[..., 3, np.newaxis][mask])
+
+    # alpha通道：result_alpha = alpha2 + (1 - alpha2) * alpha1
+    arr[..., 3][mask] = image2[..., 3][mask] + image1[..., 3][mask] * (1 - image2[..., 3][mask])
+
+    return arr
+
+def overlay(image1, image2, image3=None):
     """
     “叠加”图层混合模式
-    :param image1: 下层图层PIL Image对象，需要有alpha通道，两个PIL Image对象需要在同一模式下
-    :param image2: 上层图层PIL Image对象，需要有alpha通道，两个PIL Image对象需要在同一模式下
-    :param opacity: 上层图层的不透明度百分比，范围从0（完全透明）到1（完全不透明）
-    :return: 新的PIL Image对象
+    :param image1: 原图numpy数组
+    :param image2: 水印numpy数组
+    :param image3: 擦脸numpy数组
+    :return: 新的numpy数组
     """
-    max_value = 255
-    # 将图像转换为numpy数组
-    arr1 = np.array(image1, dtype=float) / max_value
-    arr2 = np.array(image2, dtype=float) / max_value
-    # 调整image2的透明度
-    arr2[..., 3] *= opacity
-    # 将arr初始化为arr1的副本
-    arr = arr1.copy()
-    # 找出arr2中不透明的像素（完全透明的像素将不参与计算）
-    opaque_pixels = arr2[..., 3] > 0.0
+    # 将擦脸部分在水印中的对应像素设为完全透明（image2会被修改）
+    if image3 is not None:
+        face = image3[..., 3] > 0.0
+        image2[face, 3] = 0.0
+
+    # 将arr初始化为原图的副本（image1不会被修改）
+    arr = image1.copy()
+
+    # 找出水印中不透明的像素（完全透明的像素将不参与计算）
+    opaque_pixels = image2[..., 3] > 0.0
+
     # 计算叠加模式的结果
-    mask = arr1[opaque_pixels, :3] < 0.5
-    arr[opaque_pixels, :3] = np.where(mask, 2 * arr1[opaque_pixels, :3] * arr2[opaque_pixels, :3], 1 - 2 * (1 - arr1[opaque_pixels, :3]) * (1 - arr2[opaque_pixels, :3]))
-    # 考虑image2的透明度
-    arr[opaque_pixels, :3] = arr[opaque_pixels, :3] * arr2[opaque_pixels, 3, np.newaxis] + arr1[opaque_pixels, :3] * (1 - arr2[opaque_pixels, 3, np.newaxis])
-    # 将alpha通道复制到结果中
-    arr[..., 3] = arr1[..., 3]
-    # 将结果转换回图像
-    ret = Image.fromarray((arr * max_value).astype('uint8'), 'RGBA')
-    return ret
+    mask = image1[opaque_pixels, :3] < 0.5
+    arr[opaque_pixels, :3] = np.where(mask, 2 * image1[opaque_pixels, :3] * image2[opaque_pixels, :3],
+                                      1 - 2 * (1 - image1[opaque_pixels, :3]) * (1 - image2[opaque_pixels, :3]))
+
+    # 考虑水印的透明度
+    arr[opaque_pixels, :3] = (arr[opaque_pixels, :3] * image2[opaque_pixels, 3, np.newaxis]
+                              + image1[opaque_pixels, :3] * (1 - image2[opaque_pixels, 3, np.newaxis]))
+
+    # 将原图的alpha通道复制到结果中
+    arr[..., 3] = image1[..., 3]
+
+    return arr
 
 def walk_assistant(walk_path, walk_root, file_name):
     if os.path.samefile(walk_root, walk_path):
@@ -133,25 +137,37 @@ def sy_info_assistant(sy_info_str, default_sy_config_dict):
 
 def process_image(key, value, sy_info, sy_image, snuggle_path, save_format):
     sy_mode = sy_info[1]
-    if 0 <= float(sy_info[2]) <= 100:
-        sy_opacity = float(sy_info[2]) / 100
-    else:
-        return
-    src_image = Image.open(value[0]).convert('RGBA')
-    sy_image_resize = sy_image.resize(src_image.size)
-    if sy_mode in ['0', 'normal', '正常', '普白']:
-        image_snuggle = normal(src_image, sy_image_resize, sy_opacity)
-    elif sy_mode in ['1', 'overlay', '叠加', '浮雕']:
-        image_snuggle = overlay(src_image, sy_image_resize, sy_opacity)
-    else:
-        return
+
+    # 导入原图、擦脸图
+    src_image = np.array(Image.open(value[0]).convert('RGBA'), dtype=float) / 255.0
     if len(value) > 1:
-        src_image_face = Image.open(value[1]).convert('RGBA')
-        image_snuggle = normal(image_snuggle, src_image_face)
+        src_image_face = np.array(Image.open(value[1]).convert('RGBA'), dtype=float) / 255.0
+    else:
+        src_image_face = None
+
+    # 调整水印尺寸（sy_image不会被修改）
+    height, width, channels = src_image.shape
+    sy_image_resize = cv.resize(sy_image, (width, height))
+
+    # 计算图层混合
+    if sy_mode in ['0', 'normal', '正常', '普白']:
+        image_snuggle = normal(src_image, sy_image_resize, src_image_face)
+    elif sy_mode in ['1', 'overlay', '叠加', '浮雕']:
+        image_snuggle = overlay(src_image, sy_image_resize, src_image_face)
+    else:
+        return
+
+    # 保存贴膜图
     if save_format == 'png':
-        image_snuggle.save(os.path.join(snuggle_path, '贴膜', sy_info[0], key + '.png'))
+        image_snuggle = Image.fromarray((image_snuggle * 255.0).astype('uint8'), 'RGBA')
+        image_snuggle.save(os.path.join(snuggle_path, '贴膜', sy_info[0], key + '.png'), 'PNG')
     elif save_format == 'jpg':
-        image_snuggle.convert('RGB').save(os.path.join(snuggle_path, '贴膜', sy_info[0], key + '.jpg'), quality=100, optimize=True)
+        image_snuggle = Image.fromarray((image_snuggle[..., :3] * 255.0).astype('uint8'), 'RGB')
+        image_snuggle.save(os.path.join(snuggle_path, '贴膜', sy_info[0], key + '.jpg'), 'JPEG', quality=100, optimize=True)
+    elif save_format == 'webp':
+        image_snuggle = Image.fromarray((image_snuggle * 255.0).astype('uint8'), 'RGBA')
+        image_snuggle.save(os.path.join(snuggle_path, '贴膜', sy_info[0], key + '.webp'), 'WEBP', lossless=True)
+        # image_snuggle.save(os.path.join(snuggle_path, '贴膜', sy_info[0], key + '.webp'), 'WEBP', quality=90)
 
 def snuggle(snuggle_path, save_format, default_sy_config_dict):
     start_time = time.time()
@@ -159,7 +175,7 @@ def snuggle(snuggle_path, save_format, default_sy_config_dict):
     src_dict = dict()
     for root, dirs, files in os.walk(os.path.join(snuggle_path, '原图')):
         for file in files:
-            if '擦脸' not in file and file.lower().endswith(('.png', '.jpg', '.jpeg')):
+            if '擦脸' not in file and file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
                 file0 = walk_assistant(os.path.join(snuggle_path, '原图'), root, os.path.splitext(file)[0])
                 src_dict[file0] = [os.path.join(root, file)]
         for file in files:
@@ -169,19 +185,33 @@ def snuggle(snuggle_path, save_format, default_sy_config_dict):
                     src_dict[file0].append(os.path.join(root, file))
 
     with ThreadPoolExecutor() as executor:
+    # with ThreadPoolExecutor(max_workers=int(os.cpu_count()*0.9)) as executor:
         futures = []
+
         for root, dirs, files in os.walk(os.path.join(snuggle_path, '水印')):
             for file in files:
                 if file.lower().endswith('.png'):
-                    # sy_info = os.path.splitext(file)[0].split('-')
                     sy_info = sy_info_assistant(os.path.splitext(file)[0], default_sy_config_dict)
                     if len(sy_info) != 3:
                         continue
+
                     if not os.path.exists(os.path.join(snuggle_path, '贴膜', sy_info[0])):
                         os.makedirs(os.path.join(snuggle_path, '贴膜', sy_info[0]))
+
+                    # 导入水印
                     sy_image = Image.open(os.path.join(root, file)).convert('RGBA')
+                    sy_image = np.array(sy_image, dtype=float) / 255.0
+
+                    # 调整水印不透明度
+                    if 0.0 <= float(sy_info[2]) <= 100.0:
+                        sy_opacity = float(sy_info[2]) / 100.0
+                    else:
+                        continue
+                    sy_image[..., 3] *= sy_opacity
+
                     for key, value in src_dict.items():
                         futures.append(executor.submit(process_image, key, value, sy_info, sy_image, snuggle_path, save_format))
+
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="贴膜进度"):
             pass
 
@@ -206,7 +236,7 @@ def main():
 
                             # 说明：
                             # 可以在这里填写默认的贴膜路径和出图格式。（冒号后的空格不要删）
-                            # 出图格式选填 png 或 jpg 。
+                            # 出图格式选填 png/jpg/webp 。
                             # 这里填了之后就不用每次贴膜前填了（填错了就还是会每次都问）。
                             
                             默认图层混合模式: 
@@ -232,7 +262,7 @@ def main():
                             # 贴膜时，会一次性贴“水印”文件夹中的所有水印和“原图”文件夹中的所有原图。不需要贴的图或水印请放在别的地方。
                             # 可以按水印命名规则为每个水印指定贴膜时用的图层混合模式和不透明度。如果有错误，这张水印就不贴。
                             # 贴膜完成后，可以在“贴膜”文件夹中找到每个水印对应的贴膜图。
-                            # 仅支持8位图（有的地方会显示为24位或32位）。不支持16位图。
+                            # 仅支持8位图（有的地方会显示为24位或32位）。
 
                             # 水印命名规则：
                             # 水印命名格式为：标签-模式-不透明度.png
@@ -263,16 +293,16 @@ def main():
                     break
                 else:
                     print("路径不存在，请重新输入。")
-        if config.get("出图格式", "") is not None and config.get("出图格式", "") in ['png', 'jpg']:
+        if config.get("出图格式", "") is not None and config.get("出图格式", "") in ['png', 'jpg', 'webp']:
             SAVEFORMAT = config["出图格式"]
             print("出图格式：", SAVEFORMAT)
         else:
             while True:
-                SAVEFORMAT = input("出图格式：（png/jpg）")
-                if SAVEFORMAT in ['png', 'jpg']:
+                SAVEFORMAT = input("出图格式：（png/jpg/webp）")
+                if SAVEFORMAT in ['png', 'jpg', 'webp']:
                     break
                 else:
-                    print("只能是png或jpg格式哦~")
+                    print("只能是png/jpg/webp格式哦~")
         print('')
 
         sy_config = dict()
