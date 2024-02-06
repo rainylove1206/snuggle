@@ -92,7 +92,13 @@ def walk_assistant(walk_path, walk_root, file_name):
     else:
         return (os.path.relpath(walk_root, walk_path).replace(os.sep, '_') + '_' + file_name).replace(' ', '_')
 
-def sy_info_assistant(sy_info_str, default_sy_config_dict):
+def config_assistant(config_dict, item):
+    if config_dict.get(item, "") is not None:
+        return config_dict.get(item, "")
+    else:
+        return ""
+
+def sy_info_assistant(sy_info_str, default_config):
     # 模式列表
     modes_normal = ['0', 'normal', '正常', '普白']
     modes_overlay = ['1', 'overlay', '叠加', '浮雕']
@@ -113,7 +119,7 @@ def sy_info_assistant(sy_info_str, default_sy_config_dict):
             parts.pop(i)
             break
     else:
-        default_mode = str(default_sy_config_dict.get('默认图层混合模式', ''))
+        default_mode = str(config_assistant(default_config, '默认图层混合模式'))
         if default_mode in modes_normal + modes_overlay:
             mode = default_mode
         else:
@@ -121,8 +127,8 @@ def sy_info_assistant(sy_info_str, default_sy_config_dict):
 
     # 检查默认不透明度
     if mode:
-        default_opacity = default_sy_config_dict.get('“正常”混合模式默认水印不透明度', '') \
-            if mode in modes_normal else default_sy_config_dict.get('“叠加”混合模式默认水印不透明度', '')
+        default_opacity = config_assistant(default_config, '“正常”混合模式默认水印不透明度') \
+            if mode in modes_normal else config_assistant(default_config, '“叠加”混合模式默认水印不透明度')
         try:
             default_opacity = float(default_opacity)
             if not 0 <= default_opacity <= 100:
@@ -174,7 +180,7 @@ def process_image(key, value, sy_info, sy_arr, snuggle_path, save_format):
         image_snuggle.save(os.path.join(snuggle_path, '3.贴膜', sy_info[0], key + '.webp'),
                            'WEBP', lossless=True, method=1)
 
-def snuggle(snuggle_path, save_format, default_sy_config_dict):
+def snuggle(snuggle_path, save_format, default_config):
     start_time = time.time()
 
     src_dict = dict()
@@ -193,10 +199,17 @@ def snuggle(snuggle_path, save_format, default_sy_config_dict):
     # with ThreadPoolExecutor(max_workers=int(os.cpu_count()*0.9)) as executor:
         futures = []
 
+        # 检查水印alpha通道（可选）1/3（yaml中填[true/True/TRUE/非0的数字]都是True）
+        if config_assistant(default_config, '检查水印透明度通道最大值'):
+            alpha_check = True
+            alpha_rec = list()
+        else:
+            alpha_check = False
+
         for root, dirs, files in os.walk(os.path.join(snuggle_path, '2.水印')):
             for file in files:
                 if file.lower().endswith('.png'):
-                    sy_info = sy_info_assistant(os.path.splitext(file)[0], default_sy_config_dict)
+                    sy_info = sy_info_assistant(os.path.splitext(file)[0], default_config)
                     if len(sy_info) != 3:
                         continue
 
@@ -205,6 +218,11 @@ def snuggle(snuggle_path, save_format, default_sy_config_dict):
 
                     # 导入水印
                     sy_arr = np.array(Image.open(os.path.join(root, file)).convert('RGBA'), dtype=float) / 255.0
+
+                    # 检查水印alpha通道（可选）2/3
+                    if alpha_check:
+                        alpha_max = sy_arr[..., 3].max()
+                        alpha_rec.append([file, f'{alpha_max:.0%}'])
 
                     # 调整水印不透明度
                     if 0.0 <= float(sy_info[2]) <= 100.0:
@@ -215,6 +233,19 @@ def snuggle(snuggle_path, save_format, default_sy_config_dict):
 
                     for key, value in src_dict.items():
                         futures.append(executor.submit(process_image, key, value, sy_info, sy_arr, snuggle_path, save_format))
+
+        # 检查水印alpha通道（可选）3/3
+        if alpha_check:
+            # 计算每列的最大宽度
+            col_widths = [max(len(row[0]) for row in alpha_rec), max(len(row[1]) for row in alpha_rec)]
+            # 打印上框线
+            print("+" + "-" * (col_widths[0] + 2) + "+" + "-" * (col_widths[1] + 3) + "+")
+            # 打印数据行
+            for row in alpha_rec:
+                file, alpha_max = row
+                print(f"  {file:<{col_widths[0]}}   {alpha_max:<{col_widths[1]}}  ")
+            # 打印下框线
+            print("+" + "-" * (col_widths[0] + 2) + "+" + "-" * (col_widths[1] + 3) + "+")
 
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="贴膜进度"):
             pass
@@ -238,12 +269,16 @@ def main():
                             “正常”混合模式默认水印不透明度: 
                             “叠加”混合模式默认水印不透明度: 
                             
+                            自动打开文件夹: 
+                            检查水印透明度通道最大值: 
+
                             ############################################################
                             
                             # 说明：
                             # 出图格式选填 png/jpg/webp 。
                             # 图层混合模式选填0或1，0为“正常”，1为“叠加”。直接写中文字也可以。
                             # 水印不透明度选填0-100之间的数，0为完全透明，100为完全不透明。
+                            # 剩余功能项，如果需要，可填true开启对应功能，不填或填false为关闭。
                             
                             # 贴膜参数由水印的文件名指定。水印命名格式为：标签-模式-不透明度.png
                             # 标签可以是贴膜QQ号或者其他一些用于区分的内容（没有其他作用）。
@@ -267,6 +302,7 @@ def main():
                     break
                 else:
                     print("路径不存在，请重新输入。")
+
         if config.get("出图格式", "") is not None and config.get("出图格式", "") in ['png', 'jpg', 'webp']:
             SAVEFORMAT = config["出图格式"]
             print("出图格式：", SAVEFORMAT)
@@ -277,35 +313,27 @@ def main():
                     break
                 else:
                     print("只能是png/jpg/webp格式哦~")
-        print('')
 
-        sy_config = dict()
-        for item in ['默认图层混合模式', '“正常”混合模式默认水印不透明度', '“叠加”混合模式默认水印不透明度']:
-            if config.get(item, "") is not None:
-                sy_config[item] = config.get(item, "")
-            else:
-                sy_config[item] = ""
+        print('')
     except:
         return
 
     for dir in ['1.原图', '2.水印', '3.贴膜']:
         if not os.path.exists(os.path.join(PATH, dir)):
             os.makedirs(os.path.join(PATH, dir))
-        # 自动打开这三个文件夹（仅Windows平台）
-        subprocess.run(f'explorer {os.path.join(PATH, dir)}')
+
+        # 自动打开这三个文件夹（可选）（仅Windows平台）
+        if config_assistant(config, '自动打开文件夹'):
+            subprocess.run(f'explorer {os.path.join(PATH, dir)}')
 
     while True:
         try:
             input("按Enter键开始贴膜~")
-            snuggle(PATH, SAVEFORMAT, sy_config)
+            snuggle(PATH, SAVEFORMAT, config)
             print('')
         except:
             break
 
 if __name__ == "__main__":
     main()
-
-
-
-
 
